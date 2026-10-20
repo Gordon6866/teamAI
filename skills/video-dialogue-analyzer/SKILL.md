@@ -1,6 +1,6 @@
 ---
 name: video-dialogue-analyzer
-description: "\---   name: video-dialogue-analyzer   description: 批量分析视频中的人机对话（如车载/智能音箱语音助手录像）：本地 faster-whisper 语音识别提取对话文本，按离线/在线、唤醒方式、具体指令结构化分类，再按摘要批量重命名视频并输出 Excel 报表。默认由 Agent 直接分类，\*\*无需 API Key、无需 ffmpeg\*\*（"
+description: 批量分析视频中的人机对话（如车载/智能音箱语音助手录像）：本地 faster-whisper 语音识别提取对话文本，按离线/在线、唤醒方式、具体指令结构化分类，再按摘要批量重命名视频并输出 Excel 报表。默认由 Agent 直接分类，\*\*无需 API Key、无需 ffmpeg\*\*（PyAV 内置解码）。适用于含人机对话语音的视频批量分类、重命名与归档。  
 tags:
   - foxskill
 ---
