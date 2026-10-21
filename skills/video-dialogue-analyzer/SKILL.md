@@ -1,12 +1,3 @@
----
-name: video-dialogue-analyzer
-description: 批量分析视频中的人机对话（如车载/智能音箱语音助手录像）：本地 faster-whisper 语音识别提取对话文本，按离线/在线、唤醒方式、具体指令结构化分类，再按摘要批量重命名视频并输出 Excel 报表。默认由 Agent 直接分类，\*\*无需 API Key、无需 ffmpeg\*\*（PyAV 内置解码）。适用于含人机对话语音的视频批量分类、重命名与归档。  
-tags:
-  - foxskill
----
-
-# video-dialogue-analyzer
-
 \---  
 name: video-dialogue-analyzer  
 description: 批量分析视频中的人机对话（如车载/智能音箱语音助手录像）：本地 faster-whisper 语音识别提取对话文本，按离线/在线、唤醒方式、具体指令结构化分类，再按摘要批量重命名视频并输出 Excel 报表。默认由 Agent 直接分类，\*\*无需 API Key、无需 ffmpeg\*\*（PyAV 内置解码）。适用于含人机对话语音的视频批量分类、重命名与归档。  
@@ -172,4 +163,173 @@ results = classify_and_rename(cfg, transcripts, classifications)
 #### 离线 / 在线 判定细则（按优先级）
 
 | 优先级 | 条件                                      | 判定   |
-| --- | -------------------------------
+| --- | --------------------------------------- | ---- |
+| ①   | 对话明确提到"离线状态""离线模式""已切换到离线"              | `离线` |
+| ②   | 助手反馈"当前网络异常""网络连接失败""请检查网络""无法连接到服务器"   | `离线` |
+| ③   | 以上均无，且助手只能响应**固定模板指令**（说法稍变即拒识、或反复答非所问） | `离线` |
+| ④   | 以上均无，助手全程正常响应，且能理解**间接/模糊/多样**的口语表达     | `在线` |
+
+**核心原则：举证责任在「离线」一方。** 必须存在**正面证据**才判 `离线`；若无任何离线信号，一律默认 `在线`。
+
+> ⚠️ **常见误判（务必避免）**：不要用"对话里没有查天气/搜索/翻译"来判离线。  
+> 这是**诉诸无知的逻辑错误**——没有云端查询的证据，不等于设备离线的证据。  
+> 设备处于在线状态时，照样可以执行本地硬件控制（车控空调、开灯、关窗等）。  
+> **网络状态 ≠ 命令的执行位置**，二者是正交维度，不可混为一谈。
+
+判定 `在线` 的关键信号（具备其一即可，说明助手正在使用云端语义理解）：
+
+- **从环境描述 / 间接表达推断意图**：如 `"车里太闷了，打开冷气"` → 助手推断出要开空调（用户并未说出"开空调"）。
+- **把模糊口语映射为具体模式**：如 `"降降温"` → 助手执行"急速降温"。
+- **同义说法归一**：如 `"调低冷气"` / `"温度往上调一调"` / `"升一度"` 被识别为同一意图。
+
+这类能力来自云端大模型，纯离线的固定模板匹配做不到。
+
+本步骤的异常分支（均跳过改名，但仍写入 Excel 保留对话原文）：
+
+| 情况                               | `status`           |
+| -------------------------------- | ------------------ |
+| `online` 模式：API 调用失败 / JSON 解析异常 | `ai_fail`          |
+| `agent` 模式：未提供该视频的分类结果           | `pending_classify` |
+
+> 完整 Prompt 模板见 `templates/analyze_prompt.txt`（**仅 `online` / `offline` 模式使用**）；  
+> 字段类型、状态枚举与两阶段函数签名见 `references/api-spec.md`。
+
+### 步骤 4：按照提取的关键信息对视频文件进行重命名
+
+1. 文件名拼接格式：`{net_type}-{wake_type}-{dialog_content}`，例如 `在线-唤醒-开关冷气`。
+   > 注意：示例用「在线」而非「离线」——判 `离线` 需要正面证据，详见步骤 3 的判定细则。
+2. 每个字段分别清洗 Windows 非法字符（`\ / : * ? " < > |` 及换行制表符），空值字段自动跳过。
+3. 拼接后按 `max_filename_len` 截断总长度（默认 30 字符）。
+4. 拼接原视频扩展名，生成新文件名。
+5. 重名冲突时自动追加 `_1`、`_2` 后缀，防止覆盖。
+6. **安全分支**：
+   - `preview_only=True`（默认）：仅计算并打印预期新文件名，**不执行 `os.rename`**。
+   - `preview_only=False`：执行真实磁盘重命名。
+
+## 输出产物
+
+### 1. 结构化结果列表（内存返回）
+
+每个视频对应一个结果对象，字段定义见 `references/api-spec.md`。
+
+### 2. Excel 报表
+
+`export_excel=True` 时，在视频文件夹输出 `视频人机对话分析结果.xlsx`，列包括：
+
+原文件名 | 完整对话 | 离线/在线 | 唤醒类型 | 具体指令 | 新文件名 | 处理状态
+
+## 使用方式
+
+### 直接运行脚本
+
+```bash
+python scripts/video_dialogue_analyzer.py
+```
+
+运行前修改脚本顶部 `SKILL_CONFIG` 字典中的参数。**首次务必保持 `preview_only=True`**，确认 Excel 结果符合预期后再改为 `False` 执行真实改名。
+
+### 作为模块导入（agent 模式，推荐）
+
+```python
+from scripts.video_dialogue_analyzer import transcribe_videos, classify_and_rename
+
+config = {
+    "video_folder": r"D:\videos",
+    "model_dir": r"C:\Users\Gordon\.workbuddy\binaries\faster-whisper-small",  # 跳过下载
+    "run_mode": "agent",       # Agent 自己分类，无需 API Key
+    "preview_only": True,
+}
+
+# 阶段一：转录
+transcripts = transcribe_videos(config)
+
+# 阶段二：Agent 分类后传回（键为原文件名）
+classifications = {
+    t["src_filename"]: {"net_type": "在线", "wake_type": "唤醒", "dialog_content": "开关冷气"}
+    for t in transcripts if t["status"] == "success"
+}
+results = classify_and_rename(config, transcripts, classifications)
+```
+
+## 已验证的本地运行环境
+
+以下路径在本机已实测跑通，可直接复用，**不要重复安装**：
+
+| 项目          | 路径 / 值                                                                       |
+| ----------- | ---------------------------------------------------------------------------- |
+| Python venv | `C:\Users\Gordon\.workbuddy\binaries\python\envs\default`                    |
+| venv 解释器    | `C:\Users\Gordon\.workbuddy\binaries\python\envs\default\Scripts\python.exe` |
+| 已装包         | faster-whisper、openpyxl、requests、PyAV(av 18.1.0)                             |
+| 本地模型目录      | `C:\Users\Gordon\.workbuddy\binaries\faster-whisper-small`                   |
+
+**直接用这个解释器跑，并把 `model_dir` 指向本地模型**，即可完全离线、免下载：
+
+```python
+config = {
+    "video_folder": r"C:\Users\Gordon\Desktop\test",
+    "model_dir": r"C:\Users\Gordon\.workbuddy\binaries\faster-whisper-small",
+    "run_mode": "agent",
+    "preview_only": True,
+}
+
+## 配置参数
+
+| 参数                 | 类型    | 默认值                     | 说明                                                    |
+| ------------------ | ----- | ----------------------- | ----------------------------------------------------- |
+| `video_folder`     | str   | 必填                      | 视频文件夹绝对路径                                             |
+| `whisper_model`    | str   | `small`                 | faster-whisper 模型：tiny/base/small/medium              |
+| `model_dir`        | str   | 空                       | 本地模型目录绝对路径；非空时直接加载，**跳过联网下载**（推荐，见下方注意事项）             |
+| `device`           | str   | `cpu`                   | 推理设备：`cpu` / `cuda`（有 NVIDIA 显卡时用 cuda 大幅加速）          |
+| `compute_type`     | str   | `int8`                  | 推理精度：CPU 用 `int8`（推荐）；cuda 可用 `float16`               |
+| `hf_endpoint`      | str   | `https://hf-mirror.com` | HuggingFace 镜像地址，国内网络必配                               |
+| `language`         | str   | `zh`                    | 语音识别语言                                                |
+| `preview_only`     | bool  | `True`                  | 预览模式，不修改文件                                            |
+| `export_excel`     | bool  | `True`                  | 是否输出 Excel 报表                                         |
+| `max_filename_len` | int   | `30`                    | 生成文件名最大字符数                                            |
+| `run_mode`         | str   | `agent`                 | 分类方式：`agent`（Agent 直接分类，无需 Key）/ `online` / `offline` |
+| `api_key`          | str   | 占位符                     | 大模型 API Key，**仅 `online` 模式需要**                       |
+| `api_url`          | str   | 火山方舟地址                  | 兼容 OpenAI 格式的接口地址，**仅 `online` 模式**                   |
+| `llm_model_name`   | str   | `doubao-pro-4k`         | 大模型名称，**仅 `online` 模式**                               |
+| `video_suffix`     | tuple | `.mp4 .mkv .avi .mov`   | 支持的视频后缀                                               |
+
+## 分类模式说明
+
+- **`run_mode=agent`（默认）**：步骤 3 由 Agent 按本文「离线/在线 判定细则」直接判断，**不需要 API Key，也没有额外成本**。实测质量不输 API——因为判定依赖的是对对话语义的理解，而这正是 Agent 的强项。
+- **`run_mode=online`**：调用火山方舟 doubao 等兼容 OpenAI 格式的接口，Prompt 见 `templates/analyze_prompt.txt`。需配置 `api_key` 并安装 `requests`。
+- **`run_mode=offline`**：替换为本地大模型推理（如 Qwen 量化模型 via llama-cpp-python 或 transformers）。输入（对话文本 + Prompt）和输出（JSON 结构）与前两者完全一致，仅推理函数不同，步骤 1、2、4 及 Excel 输出逻辑无需改动。
+
+## 注意事项
+
+- Whisper 语音识别可能产生错别字，直接影响分类和文件名质量。唤醒词、助手自称最容易被误识（实测出现过"看一晚""智能"这类错字），判读时优先看**对话结构**（唤醒→应答→指令）而非个别词面。
+- 视频开头静音或纯背景音乐时，识别文本可能为空，标记为 `no_speech`。
+- faster-whisper 在 CPU 上已足够快（实测 `small` 模型处理 147 秒音频约 1 分钟）；有 NVIDIA 显卡可用 `device="cuda"` + `compute_type="float16"` 进一步加速。
+- 建议先用 2-3 个视频复制到测试文件夹验证全流程，再批量处理原始视频。
+- 批量处理时用 `transcribe_videos` → `classify_and_rename` 两阶段写法，**避免重复转录**。
+
+### 国内网络下载模型的两个必备配置
+
+首次运行需从 HuggingFace 下载模型（如 `small` 约 483MB）。国内网络必须同时做两件事，否则会失败：
+```
+
+
+```python
+import os
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")  # 走国内镜像
+os.environ["HF_HUB_DISABLE_XET"] = "1"                          # 关键：禁用 Xet 协议
+```
+
+- **不禁用 Xet 会报 `401 Unauthorized`**：hf-mirror 不支持 Xet 协议，请求仍会打到 `cas-server.xethub.hf.co` 被拒。
+- **禁用 Xet 后可能报 `model.bin is incomplete`**：这是 Windows 下 HF 缓存目录的**快照符号链接失效**导致的，blob 本体通常已完整下载（可用 Content-Length 比对确认），不是文件损坏。
+
+**推荐做法：把模型落到本地目录，一劳永逸。** 从 HF 缓存的 `blobs/` 里把文件按原名复制出来即可，避免重复下载几百 MB：
+
+```bash
+# 缓存路径：~/.cache/huggingface/hub/models--Systran--faster-whisper-<size>/blobs/
+mkdir -p ~/.workbuddy/binaries/faster-whisper-small
+cp <blob_model.bin>      ~/.workbuddy/binaries/faster-whisper-small/model.bin
+cp <blob_tokenizer.json> ~/.workbuddy/binaries/faster-whisper-small/tokenizer.json
+cp <blob_vocab.txt>      ~/.workbuddy/binaries/faster-whisper-small/vocabulary.txt
+cp <blob_config.json>    ~/.workbuddy/binaries/faster-whisper-small/config.json
+```
+
+随后在配置里指定 `model_dir` 为该目录，即可完全跳过联网下载。
